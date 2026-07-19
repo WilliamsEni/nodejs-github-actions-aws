@@ -39,7 +39,7 @@ jobs:
             --exclude='.git' \
             --exclude='.github' \
             --exclude='node_modules' \
-            -czf nodejs-app.tar.gz .
+            -czf deployment.tar.gz .
 
       - name: Configure SSH
         env:
