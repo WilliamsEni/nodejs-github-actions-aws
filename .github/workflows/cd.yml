@@ -1,0 +1,99 @@
+name: Deploy to AWS EC2
+
+on:
+  workflow_run:
+    workflows:
+      - Node.js CI
+    types:
+      - completed
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Node.js Application
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Check out successful commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Create deployment package
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            -czf nodejs-app.tar.gz .
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_PORT: ${{ secrets.EC2_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -p "$EC2_PORT" -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload application package
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT }}
+        run: |
+          scp \
+            -i ~/.ssh/ec2_key \
+            -P "$EC2_PORT" \
+            nodejs-app.tar.gz \
+            "$EC2_USER@$EC2_HOST:/tmp/nodejs-app.tar.gz"
+
+      - name: Deploy and restart application
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT }}
+        run: |
+          ssh \
+            -i ~/.ssh/ec2_key \
+            -p "$EC2_PORT" \
+            "$EC2_USER@$EC2_HOST" << 'DEPLOY'
+              set -e
+
+              APP_DIR="/home/ubuntu/nodejs-production"
+
+              mkdir -p "$APP_DIR"
+              rm -rf "$APP_DIR"/*
+              tar -xzf /tmp/nodejs-app.tar.gz -C "$APP_DIR"
+              rm -f /tmp/nodejs-app.tar.gz
+
+              cd "$APP_DIR"
+
+              npm ci --omit=dev
+
+              if pm2 describe nodejs-cicd-app >/dev/null 2>&1; then
+                pm2 restart nodejs-cicd-app --update-env
+              else
+                pm2 start app.js --name nodejs-cicd-app
+              fi
+
+              pm2 save
+              pm2 status
+              curl --fail http://localhost:8080
+          DEPLOY
